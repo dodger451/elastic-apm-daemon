@@ -21,7 +21,7 @@ func dataReceive(conn net.Conn, ch chan string) {
 		if err != nil {
 			break //Client disconnected.
 		}
-		log.Printf("Reading line from socket to channel: %d B \n", len(data))
+		log.Printf("Got data on socket: %d B \n", len(data))
 		ch <- strings.TrimSuffix(data, "\n")
 	}
 	err := conn.Close()
@@ -31,9 +31,8 @@ func dataReceive(conn net.Conn, ch chan string) {
 	}
 }
 
-func dataSend(ch chan string, url string) {
+func dataSend(ch chan string, url string, contentheader string) {
 
-	log.Printf("Messages gathered: %d \n", len(ch))
 	num := len(ch)
 	if num == 0 {
 		return
@@ -47,14 +46,17 @@ func dataSend(ch chan string, url string) {
 		total += len(message)
 	}
 
-	log.Printf("Posting %d messages with total %d B", num, total)
-	post([]byte(body), url)
+	log.Printf("Posting %d messages (%d byte) to %s\n", num, total, url)
+
+	post([]byte(body), url, contentheader)
 }
 
-func post(data []byte, url string) {
-	log.Printf("URL:>%s", url)
+func post(data []byte, url string, contentheader string) {
+
 	req, err := http.NewRequest("POST", url, bytes.NewBuffer(data))
 	check(err, "")
+
+	req.Header.Set("Content-Type", contentheader)
 	client := &http.Client{}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -63,7 +65,7 @@ func post(data []byte, url string) {
 	}
 	defer resp.Body.Close()
 
-	log.Printf("Response Status:%s", resp.Status)
+	log.Printf("Got response: %s", resp.Status)
 }
 
 func check(err error, message string) {
@@ -75,38 +77,44 @@ func check(err error, message string) {
 	}
 }
 
-func getOpts() (int, string, string, time.Duration) {
+func getOpts() (int, string, string, time.Duration, string) {
 	sockPtr := flag.String("socket", "/tmp/.apm.sock", "default \"/tmp/.apm.sock\"")
 	urlPtr := flag.String("url", "http://localhost:8000/simple.php", "e.g. http://localhost:8000/intake/v2/events")
 	intervalPtr := flag.String("send-every", "60s", "e.g. 2m, 30s,... ")
 	bufferPtr := flag.Int("buffer", 10000, "max number of lines")
+	headerPtr := flag.String("content-type-header", "application/json", "v1 api:'application/json', v2: 'application/x-ndjson'")
+
 	flag.Parse()
 
 	intervalLength := *intervalPtr
 	interval, err := time.ParseDuration(intervalLength)
-	check(err, fmt.Sprintf("Sending data every %s.", interval.String()))
-	return *bufferPtr, *sockPtr, *urlPtr, interval
+	check(err, "")
+	return *bufferPtr, *sockPtr, *urlPtr, interval,*headerPtr
 }
 
 func main() {
-	buffer, socket, url, interval:= getOpts()
+	buffer, socket, url, interval, contentheader := getOpts()
 
 	err := os.Remove(socket)
 	l, err := net.Listen("unix", socket)
-	check(err, "apm daemon is ready.")
+	check(err, "")
+	if err = os.Chmod(socket, 0766); err != nil {
+		log.Fatal(err)
+	}
+	check(err, fmt.Sprintf("apm daemon is ready listing on socket '%s' (buffer: %d), sending data every '%s' to server at '%s' with content-type '%s'.", socket, buffer, interval.String(), url, contentheader))
 	defer l.Close()
 
 	ch := make(chan string, buffer)
 	ticker := time.NewTicker(interval)
 	go func() {
 		for range ticker.C {
-			go dataSend(ch, url)
+			go dataSend(ch, url, contentheader)
 		}
 	}()
 
 	for {
 		if len(ch) >= buffer-1 {
-			go dataSend(ch, url)
+			go dataSend(ch, url, contentheader)
 		}
 		conn, err := l.Accept()
 		check(err, "")
